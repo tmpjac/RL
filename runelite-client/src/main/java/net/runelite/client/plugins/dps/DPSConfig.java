@@ -9,12 +9,24 @@ public interface DPSConfig extends Config {
     @ConfigItem(
             position = 0,
             keyName = "separateAttackStyle",
-            name = "Should different Attack Styles be logged separately",
+            name = "Separate Attack Style",
             description = "Longer version of Should different Attack Styles be logged separately"
     )
     default boolean separateAttackStyle()
     {
         return false;
     }
+
+    @ConfigItem(
+            position = 1,
+            keyName = "separatePrayer",
+            name = "Separate Prayer",
+            description = "Longer version of Should different Attack Styles be logged separately"
+    )
+    default boolean separatePrayer()
+    {
+        return false;
+    }
+
 
 }

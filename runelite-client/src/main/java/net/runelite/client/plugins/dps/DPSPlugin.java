@@ -26,10 +26,10 @@ package net.runelite.client.plugins.dps;
 
 import com.google.inject.Provides;
 import net.runelite.api.*;
+import net.runelite.api.events.AnimationChanged;
 import net.runelite.api.events.InteractingChanged;
 import net.runelite.api.events.StatChanged;
 import net.runelite.api.events.HitsplatApplied;
-import net.runelite.api.events.VarbitChanged;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -40,15 +40,15 @@ import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.util.ImageUtil;
+import net.runelite.http.api.item.ItemEquipmentStats;
+import net.runelite.http.api.item.ItemStats;
 
 
 import javax.inject.Inject;
 import javax.swing.*;
-import java.awt.*;
 import java.awt.image.BufferedImage;
-import java.nio.Buffer;
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashMap;
 
 /*
@@ -98,67 +98,28 @@ public class DPSPlugin extends Plugin
     private DPSPanel dpsPanel;
     private int _initialHP;
 
-    private HashMap<String,AttackTuple> _lastGearOnTarget;
+    private HashMap<String,AttackTuple> _lastGearAgainstEnemy;
     private String _lastEnemy;
 
-    enum AttackStyle {
-        ACCURATE("Accurate"),
-        AGGRESSIVE("Aggressive"),
-        DEFENSIVE("Defensive"),
-        CONTROLLED("Controlled"),
-        RANGING("Ranging"),
-        LONGRANGE("Longrange"),
-        CASTING("Casting"),
-        DEFENSIVE_CASTING("Defensive Casting"),
-        OTHER("Other");
+    private HashMap<AttackTuple,DamageTuple> _ats;
+    private ArrayList<AttackTuple> _atOrder;
 
-        String _description;
-
-        AttackStyle(String description){
-            _description = description;
-        }
-    }
-
-
-    AttackStyle[][] _weaponTypes = {
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, null, AttackStyle.DEFENSIVE},
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, AttackStyle.AGGRESSIVE, AttackStyle.DEFENSIVE},
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, null, AttackStyle.DEFENSIVE},
-            {AttackStyle.RANGING, AttackStyle.RANGING, null, AttackStyle.LONGRANGE},
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, AttackStyle.CONTROLLED, AttackStyle.DEFENSIVE},
-            {AttackStyle.RANGING, AttackStyle.RANGING, null, AttackStyle.LONGRANGE},
-            {AttackStyle.AGGRESSIVE, AttackStyle.RANGING, AttackStyle.CASTING, null},
-            {AttackStyle.RANGING, AttackStyle.RANGING, null, AttackStyle.LONGRANGE},
-            {AttackStyle.OTHER, AttackStyle.AGGRESSIVE, null, null},
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, AttackStyle.CONTROLLED, AttackStyle.DEFENSIVE},
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, AttackStyle.AGGRESSIVE, AttackStyle.DEFENSIVE},
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, AttackStyle.AGGRESSIVE, AttackStyle.DEFENSIVE},
-            {AttackStyle.CONTROLLED, AttackStyle.AGGRESSIVE, null, AttackStyle.DEFENSIVE},
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, null, AttackStyle.DEFENSIVE},
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, AttackStyle.AGGRESSIVE, AttackStyle.DEFENSIVE},
-            {AttackStyle.CONTROLLED, AttackStyle.CONTROLLED, AttackStyle.CONTROLLED, AttackStyle.DEFENSIVE},
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, AttackStyle.CONTROLLED, AttackStyle.DEFENSIVE},
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, AttackStyle.AGGRESSIVE, AttackStyle.DEFENSIVE},
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, null, AttackStyle.DEFENSIVE, AttackStyle.CASTING, AttackStyle.DEFENSIVE_CASTING},
-            {AttackStyle.RANGING, AttackStyle.RANGING, null, AttackStyle.LONGRANGE},
-            {AttackStyle.ACCURATE, AttackStyle.CONTROLLED, null, AttackStyle.DEFENSIVE},
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, null, AttackStyle.DEFENSIVE, AttackStyle.CASTING, AttackStyle.DEFENSIVE_CASTING},
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, AttackStyle.AGGRESSIVE, AttackStyle.DEFENSIVE},
-            {AttackStyle.CASTING, AttackStyle.CASTING, null, AttackStyle.DEFENSIVE_CASTING},
-            {AttackStyle.ACCURATE, AttackStyle.AGGRESSIVE, AttackStyle.CONTROLLED, AttackStyle.DEFENSIVE},
-            {AttackStyle.CONTROLLED, AttackStyle.AGGRESSIVE, null, AttackStyle.DEFENSIVE},
-            {AttackStyle.AGGRESSIVE, AttackStyle.AGGRESSIVE, null, AttackStyle.AGGRESSIVE},
-            {AttackStyle.ACCURATE, null, null, AttackStyle.OTHER}
-    };
 
     @Override
     protected void startUp() throws Exception
     {
         _count = 0;
         //dpsPanel = injector.getInstance(DPSPanel2.class);
-        dpsPanel = new DPSPanel(itemManager);
-        _lastGearOnTarget = new HashMap<String,AttackTuple>();
+
+        _ats = new HashMap<AttackTuple,DamageTuple>();
+        _atOrder = new ArrayList<AttackTuple>();
+
+
+        dpsPanel = new DPSPanel(itemManager,_ats, _atOrder, dpsConfig);
+        _lastGearAgainstEnemy = new HashMap<String,AttackTuple>();
         _lastEnemy = "";
+
+
 
 
         final BufferedImage icon = ImageUtil.loadImageResource(getClass(), "mail.png");
@@ -188,72 +149,108 @@ public class DPSPlugin extends Plugin
     public  void onConfigChanged(ConfigChanged cc){
         System.out.println("Config changed");
         System.out.println(cc.getNewValue());
-        //recreate panels and redraw
-        //dps panel has a map<AttackTuple,Entry)
-        //dpsPanel.recalculatePanels();
+        SwingUtilities.invokeLater(() -> {
+            dpsPanel.redrawAll();
+        });
+
 
     }
 
 
-
-	@Subscribe
-	public void onStatChanged(StatChanged s){
-		if (s.getSkill() ==  Skill.HITPOINTS ) {
-		    //System.out.println("HP stat changed");
-            //assign weapon and armor
-            AttackTuple at = _lastGearOnTarget.get(_lastEnemy);
-
-            int currentAttackStyleVarbit = client.getVar(VarPlayer.ATTACK_STYLE);
-            int currentEquippedWeaponTypeVarbit = client.getVar(Varbits.EQUIPPED_WEAPON_TYPE);
-            int currentCastingModeVarbit = client.getVar(Varbits.DEFENSIVE_CASTING_MODE);
-
-            Item weapon = client.getItemContainer(InventoryID.EQUIPMENT).getItems()[EquipmentInventorySlot.WEAPON.getSlotIdx()];
-            AttackTuple atNew =new AttackTuple(weapon.getId(),_lastEnemy, _weaponTypes[currentEquippedWeaponTypeVarbit][currentAttackStyleVarbit]._description);
-
-            System.out.println("HP Drop    " + atNew);
-
-            _lastGearOnTarget.put(
-                    _lastEnemy,
-                    atNew
-            );
-        }
-	}
-
-
- /*Not needed because on hitsplat will check for current attack style
-    @Subscribe
-    public void onVarbitChanged(VarbitChanged event)
-    {
-        int currentAttackStyleVarbit = client.getVar(VarPlayer.ATTACK_STYLE);
-        int currentEquippedWeaponTypeVarbit = client.getVar(Varbits.EQUIPPED_WEAPON_TYPE);
-        int currentCastingModeVarbit = client.getVar(Varbits.DEFENSIVE_CASTING_MODE);
-
-        if ( "" != _lastEnemy && null != _lastGearOnTarget) {
-
-            System.out.println("combat type: " + _weaponTypes[currentEquippedWeaponTypeVarbit][currentAttackStyleVarbit]._description);
-            AttackTuple at = _lastGearOnTarget.get(_lastEnemy);
-
-            _lastGearOnTarget.put(
-                    _lastEnemy,
-                    new AttackTuple(at._weaponId, at._enemyId, _weaponTypes[currentEquippedWeaponTypeVarbit][currentAttackStyleVarbit]._description)
-            );
-        }
-
-
-    }*/
-
-
-
+    //set lastEnemy
     @Subscribe
     public void onInteractingChanged(InteractingChanged interactingChanged){
         Actor target = interactingChanged.getTarget();
         Actor source = interactingChanged.getSource();
         if (null == target || !(target instanceof  NPC) || !(source == client.getLocalPlayer())) return;
-        System.out.println("Interacting " + target.getName() + target.getCombatLevel());
+        //System.out.println("Interacting " + target.getName() + target.getCombatLevel());
         _lastEnemy = target.getName() + target.getCombatLevel(); //barbarian17
     }
 
 
+
+    //capture AttackTuple and save with respect to enemy
+    @Subscribe
+    public void onAnimationChanged(AnimationChanged event){
+
+
+        if (event.getActor() instanceof Player && event.getActor().getName() != null){
+            Player eventSource = (Player)event.getActor();
+
+            if (eventSource == null || eventSource.getName() == null || eventSource.getInteracting() == null || eventSource.getInteracting().getName() == null) return;
+
+
+            if (eventSource.equals(client.getLocalPlayer())){
+
+                AnimationData ad = AnimationData.dataForAnimation(eventSource.getAnimation());
+                if (ad == null) return;
+
+                System.out.println(ad.attackStyle);
+                System.out.println(ad.animationId);
+
+                int currentAttackStyleVarbit = client.getVar(VarPlayer.ATTACK_STYLE);
+                int currentEquippedWeaponTypeVarbit = client.getVar(Varbits.EQUIPPED_WEAPON_TYPE);
+                int currentCastingModeVarbit = client.getVar(Varbits.DEFENSIVE_CASTING_MODE);
+
+
+                Item weapon = client.getItemContainer(InventoryID.EQUIPMENT).getItems()[EquipmentInventorySlot.WEAPON.getSlotIdx()];
+                ItemStats stats = itemManager.getItemStats(weapon.getId(),false);
+                System.out.println(stats);
+
+                int attackSpeed = stats.getEquipment().getAspeed();
+
+                AttackStyle[] attackStyles = WeaponType.getWeaponType(currentEquippedWeaponTypeVarbit).getAttackStyles();
+
+                AttackStyle attackStyle = attackStyles[currentAttackStyleVarbit];
+                if (attackStyle == AttackStyle.CASTING && currentCastingModeVarbit == 1){
+                    attackStyle = AttackStyle.DEFENSIVE_CASTING;
+                }
+
+                if (attackStyle == AttackStyle.RAPID){
+                    attackSpeed -= 1;
+                }
+
+
+                Prayer[] combatPrayers = {Prayer.HAWK_EYE, Prayer.MYSTIC_LORE, Prayer.MYSTIC_MIGHT, Prayer.EAGLE_EYE, Prayer.CHIVALRY, Prayer.PIETY, Prayer.RIGOUR, Prayer.AUGURY};
+                Prayer activePrayer = null;
+                String activePrayerName = "";
+                for (Prayer p : combatPrayers){
+                    if(client.isPrayerActive(p) && ad.attackStyle.isUsingSuccessfulOffensivePray(p)){
+                        activePrayer = p;
+                        activePrayerName = p.name();
+                    }
+                }
+
+
+                System.out.println("Attack Speed: " + attackSpeed);
+                System.out.println("Style: " +  attackStyle);
+                System.out.println("Prayer: " + activePrayer);
+
+                AttackTuple atNew =new AttackTuple(weapon.getId(),_lastEnemy,attackSpeed,activePrayerName);
+
+
+
+                //System.out.println("HP Drop    " + atNew);
+
+                _lastGearAgainstEnemy.put(
+                        _lastEnemy,
+                        atNew
+                );
+
+
+            }
+
+
+        }
+
+
+
+
+
+    }
+
+
+    //lookup AttackTuple on enemy, add AttackTuple to _ats, and update DPSPanel
     @Subscribe
     public void onHitsplatApplied(HitsplatApplied h){
 
@@ -263,12 +260,24 @@ public class DPSPlugin extends Plugin
             //System.out.println(h.getActor());
             //System.out.println(client.getLocalPlayer());
             if(h.getActor() != client.getLocalPlayer()) {
-                AttackTuple at = _lastGearOnTarget.get(h.getActor().getName()+h.getActor().getCombatLevel());
-                dpsPanel.addHit(at, h.getHitsplat().getAmount());
+                AttackTuple at = _lastGearAgainstEnemy.get(h.getActor().getName()+h.getActor().getCombatLevel());
+                if (null == at) return; //if first hit is a splash, no gear info exists. for now ignore
+                if (_ats.containsKey(at)){
+                    DamageTuple curr = _ats.get(at);
+                    curr._hits += 1;
+                    curr._damage += h.getHitsplat().getAmount();
+                    if (!at._prayer.equals("")) curr._numOnPrayer += 1;
+                    _atOrder.remove(at);
+                    _atOrder.add(at); //add to the end of order
+                }else{
+                    _ats.put(at,new DamageTuple(h.getHitsplat().getAmount(),at._prayer.equals("")?0:1));
+                    _atOrder.add(at); //add to the end of order
+                }
+
                 SwingUtilities.invokeLater(() -> {
-                            dpsPanel.update(at, h.getHitsplat().getAmount(), dpsConfig);
+                    dpsPanel.update(at, h.getHitsplat().getAmount());
                 });
-                System.out.println("Hitsplat    " + at);
+                //System.out.println("Hitsplat    " + at);
 
 
             }
